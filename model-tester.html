@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Azure Speech to Text Direto - DEBUG</title>
+    <script src="https://aka.ms/csspeech/jsbrowserpackageraw"></script>
+    <style>
+        /* Estilo para indicar visualmente que um botão está desativado. */
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <button id="start">Iniciar Gravação</button>
+        <button id="stop" disabled>Parar Gravação</button>
+        <p>Teste</p>
+        <p id="status" style="font-weight: bold; color: blue;">Status: Aguardando...</p>
+    </div>
+    <br>
+    <textarea id="target" style="width:100%;min-height:600px;" placeholder="O texto reconhecido aparecerá aqui..."></textarea>
+    
+    <script>
+        // --- Referências aos elementos do DOM para manipulação via script. ---
+        const startButton = document.getElementById('start');
+        const stopButton = document.getElementById('stop');
+        const targetTextarea = document.getElementById('target');
+        const statusElement = document.getElementById('status');
+
+        // --- Variáveis de estado para gerenciar o processo de reconhecimento. ---
+        let recognizer;
+        let pushStream;
+        let isRecognizing = false;
+        const state = { text: '' };
+        let lastRealtimeText = '';
+
+        // --- Variáveis para gerenciamento do áudio via Web Audio API. ---
+        let audioContext;
+        let mediaStreamGlobal;
+        let processorNodeGlobal;
+        let sourceNodeGlobal;
+
+        // --- Função utilitária para alternar o estado dos botões. ---
+        function updateButtonStates(recognizing) {
+            startButton.disabled = recognizing;
+            stopButton.disabled = !recognizing;
+        }
+        updateButtonStates(false);
+
+        // --- Evento de clique para iniciar o reconhecimento. ---
+        startButton.onclick = async function() {
+            console.log('Botão "Iniciar Gravação" clicado.');
+            statusElement.textContent = 'Status: Tentando iniciar...';
+            updateButtonStates(true);
+            state.text = '';
+
+            if (isRecognizing) {
+                console.warn('Já está reconhecendo.');
+                statusElement.textContent = 'Status: Gravação já em progresso.';
+                return;
+            }
+
+            try {
+                console.log('Configurando Speech SDK...');
+                statusElement.textContent = 'Status: Configurando serviço de fala...';
+                
+                // --- Configuração das credenciais do serviço Azure. ---
+                // NOTA: Substitua os valores abaixo pelas suas credenciais reais.
+                // Você pode obter uma chave de assinatura e região no portal do Azure 'Implantar Modelo'.
+                const subscriptionKey = 'abcdefghijklmnopqrstuvwxyz123456'; 
+                const serviceRegion = 'eastus';
+                const endpointIdValue = 'abcdefg-hijklmnopqrs-tuvwxyz-123456';
+
+                console.log(`Usando Chave: ${subscriptionKey}, Região: ${serviceRegion}, EndpointID: ${endpointIdValue || 'Nenhum'}`);
+
+                // --- Criação da configuração de fala com as credenciais. ---
+                const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(subscriptionKey, serviceRegion);
+                speechConfig.speechRecognitionLanguage = 'pt-BR';
+                if (endpointIdValue) {
+                    speechConfig.endpointId = endpointIdValue;
+                }
+                
+                console.log('SpeechConfig criado.');
+                statusElement.textContent = 'Status: Configuração de fala OK.';
+
+                // --- Configuração do stream de áudio para o formato esperado pela Azure (PCM 16kHz, 16-bit, mono). ---
+                const azureAudioFormat = SpeechSDK.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1);
+                pushStream = SpeechSDK.AudioInputStream.createPushStream(azureAudioFormat);
+                const audioConfig = SpeechSDK.AudioConfig.fromStreamInput(pushStream);
+                
+                // --- Instanciação do objeto principal de reconhecimento. ---
+                recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+                console.log('Reconhecedor criado.');
+                statusElement.textContent = 'Status: Reconhecedor pronto.';
+
+                // --- Definição dos Callbacks (event handlers) do reconhecedor. ---
+
+                // 'recognizing': Disparado para resultados parciais, em tempo real.
+                recognizer.recognizing = (s, e) => {
+                    if (e.result.reason === SpeechSDK.ResultReason.RecognizingSpeech) {
+                        statusElement.textContent = 'Status: Ouvindo... ' + e.result.text;
+                        lastRealtimeText = e.result.text;
+                        targetTextarea.value = (state.text + ' ' + lastRealtimeText).trim();
+                    }
+                };
+
+                // 'recognized': Disparado para um resultado final de um segmento de fala.
+                recognizer.recognized = (s, e) => {
+                    console.log('Evento recognized (final). Razão:', SpeechSDK.ResultReason[e.result.reason]);
+                    statusElement.textContent = 'Status: Processando resultado...';
+                    if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+                        
+                        let recognizedText = e.result.text;
+                        console.log('RECONHECIDO (original):', recognizedText);
+                        statusElement.textContent = 'Status: Fala reconhecida! "' + recognizedText + '"';
+
+                        // --- Lógica de pós-processamento para substituir palavras-chave por pontuação. ---
+                        // Exemplo: "2 pontos" -> ":", "ponto" -> ".", etc.
+                        // Adicione ou modifique as regras conforme necessário.
+                        const specialChars = [
+                            { key: '2 pontos', value: ':' },
+                            { key: 'ponto', value: '.' },
+                            { key: 'abre parênteses', value: '(' },
+                            { key: 'fecha parênteses', value: ')' },
+                            { key: 'abre aspas', value: '"' },
+                            { key: 'fecha aspas', value: '"' },
+                            { key: ' barra ', value: '/' },
+                            { key: ', barra ', value: '/' }
+                        ];
+
+                        let processedText = recognizedText.replace(/parágrafo/gi, '\n');
+
+                        specialChars.forEach(item => {
+                            const regex = new RegExp(`\\b${item.key}\\b`, 'gi');
+                            processedText = processedText.replace(regex, item.value);
+                        });
+
+                        // --- Acumula o texto processado e atualiza a interface. ---
+                        state.text += ' ' + processedText;
+                        targetTextarea.value = state.text.trim();
+                        lastRealtimeText = '';
+
+                    } else if (e.result.reason === SpeechSDK.ResultReason.NoMatch) {
+                        console.log('NOMATCH: Fala não pôde ser reconhecida.');
+                        statusElement.textContent = 'Status: Nenhuma fala detectada ou não reconhecida.';
+                    }
+                };
+
+                // 'canceled': Disparado em caso de erro ou cancelamento da sessão.
+                recognizer.canceled = (s, e) => {
+                    console.error('Evento CANCELED. Razão:', SpeechSDK.CancellationReason[e.reason]);
+                    let cancellationDetails = e.errorDetails ? ` Detalhes: ${e.errorDetails}` : '';
+                    statusElement.textContent = 'Status: Gravação cancelada. Razão: ' + SpeechSDK.CancellationReason[e.reason] + cancellationDetails;
+                    if (e.reason === SpeechSDK.CancellationReason.Error) {
+                        console.error('DETALHES DO ERRO DE CANCELAMENTO:', e.errorCode, e.errorDetails);
+                        alert('Erro na gravação: ' + e.errorDetails + '\nVerifique o console (F12).');
+                    }
+                    stopRecording();
+                };
+
+                // 'sessionStarted' e 'sessionStopped': Callbacks para o ciclo de vida da conexão com a Azure.
+                recognizer.sessionStarted = (s, e) => {
+                    console.log('Evento sessionStarted. ID da Sessão:', e.sessionId);
+                    statusElement.textContent = 'Status: Sessão de gravação iniciada com a Azure.';
+                };
+                recognizer.sessionStopped = (s, e) => {
+                    console.log('Evento sessionStopped. ID da Sessão:', e.sessionId);
+                    statusElement.textContent = 'Status: Sessão de gravação com Azure parada.';
+                    stopRecording();
+                };
+
+                // --- Inicia o reconhecimento e a captura de áudio. ---
+                console.log('Iniciando reconhecimento contínuo (startContinuousRecognitionAsync)...');
+                statusElement.textContent = 'Status: Iniciando escuta da Azure...';
+                await recognizer.startContinuousRecognitionAsync();
+                isRecognizing = true;
+                console.log('Reconhecimento contínuo INICIADO.');
+                statusElement.textContent = 'Status: Azure escutando. Solicitando microfone...';
+
+                // --- Captura de áudio do microfone via Web Audio API. ---
+                console.log('Configurando captura de áudio do navegador (getUserMedia)...');
+                mediaStreamGlobal = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { channelCount: 1 }
+                });
+                const userMediaSampleRate = mediaStreamGlobal.getAudioTracks()[0].getSettings().sampleRate;
+                console.log('Taxa de amostragem REAL do MediaStream (getUserMedia):', userMediaSampleRate);
+                statusElement.textContent = `Status: Microfone acessado (${userMediaSampleRate}Hz). Configurando processador de áudio...`;
+                
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                console.log('Taxa de amostragem REAL do AudioContext:', audioContext.sampleRate);
+
+                sourceNodeGlobal = audioContext.createMediaStreamSource(mediaStreamGlobal);
+                
+                const bufferSize = 4096; 
+                processorNodeGlobal = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+                const inputSampleRate = audioContext.sampleRate;
+                const outputSampleRate = 16000;
+                console.log(`Processador de áudio: Entrada ${inputSampleRate}Hz, Saída para Azure ${outputSampleRate}Hz`);
+
+                // --- Callback para processar os buffers de áudio capturados. ---
+                processorNodeGlobal.onaudioprocess = function(event) {
+                    if (!isRecognizing || !pushStream) {
+                        return; 
+                    }
+                    const inputData = event.inputBuffer.getChannelData(0);
+                    let processedData;
+
+                    // --- Bloco de reamostragem (downsampling) para 16kHz, se necessário. ---
+                    if (inputSampleRate === outputSampleRate) {
+                        processedData = inputData;
+                    } else if (inputSampleRate > outputSampleRate) { 
+                        const ratio = inputSampleRate / outputSampleRate;
+                        if (Number.isInteger(ratio)) {
+                            const numOutputSamples = Math.floor(inputData.length / ratio);
+                            processedData = new Float32Array(numOutputSamples);
+                            for (let i = 0; i < numOutputSamples; i++) {
+                                processedData[i] = inputData[i * ratio];
+                            }
+                        } else {
+                            console.warn(`Reamostragem de ${inputSampleRate}Hz para ${outputSampleRate}Hz não é um múltiplo simples. Enviando original (qualidade pode ser afetada).`);
+                            processedData = inputData;
+                        }
+                    } else {
+                        console.warn(`Upsampling de ${inputSampleRate}Hz para ${outputSampleRate}Hz não suportado. Enviando original.`);
+                        processedData = inputData;
+                    }
+                    
+                    // --- Conversão do buffer para PCM 16-bit e envio ao pushStream. ---
+                    const buffer = new ArrayBuffer(processedData.length * 2);
+                    const view = new DataView(buffer);
+                    for (let i = 0; i < processedData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, processedData[i]));
+                        view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                    }
+                    
+                    if (pushStream) { 
+                        pushStream.write(buffer);
+                    }
+                };
+
+                // --- Conexão dos nós da Web Audio API. ---
+                sourceNodeGlobal.connect(processorNodeGlobal);
+                processorNodeGlobal.connect(audioContext.destination);
+
+                console.log('Captura de áudio configurada e conectada.');
+                statusElement.textContent = 'Status: Gravação iniciada! Fale algo.';
+
+            } catch (err) {
+                console.error('ERRO GERAL AO TENTAR INICIAR:', err.name, err.message, err.stack);
+                statusElement.textContent = 'Status: Erro crítico ao iniciar - ' + err.message;
+                alert('Ocorreu um erro crítico: ' + err.message + '\nVerifique o console para mais detalhes (F12).');
+                stopRecording();
+            }
+        };
+
+        // --- Evento de clique para parar o reconhecimento. ---
+        stopButton.onclick = function() {
+            console.log('Botão "Parar Gravação" clicado.');
+            statusElement.textContent = 'Status: Parando gravação...';
+            stopRecording();
+        };
+
+        // --- Função para parar e liberar todos os recursos de forma segura. ---
+        function stopRecording() {
+            console.log('Função stopRecording chamada.');
+            if (isRecognizing && recognizer) {
+                console.log('Parando reconhecedor...');
+                recognizer.stopContinuousRecognitionAsync(
+                    () => { console.log('Reconhecimento parado (callback sucesso).'); },
+                    (err) => { console.error('Erro ao parar reconhecimento (callback):', err); }
+                );
+            }
+            
+            if (pushStream) {
+                console.log('Fechando pushStream.');
+                pushStream.close();
+                pushStream = undefined;
+            }
+            
+            if (mediaStreamGlobal) {
+                console.log('Parando tracks do MediaStream (microfone).');
+                mediaStreamGlobal.getTracks().forEach(track => track.stop());
+                mediaStreamGlobal = undefined;
+            }
+
+            if (processorNodeGlobal) {
+                console.log('Desconectando processador de áudio.');
+                processorNodeGlobal.disconnect();
+                processorNodeGlobal = undefined;
+            }
+            if (sourceNodeGlobal) {
+                sourceNodeGlobal.disconnect();
+                sourceNodeGlobal = undefined;
+            }
+            if (audioContext && audioContext.state !== 'closed') {
+                console.log('Fechando AudioContext.');
+                audioContext.close();
+                audioContext = undefined;
+            }
+            
+            isRecognizing = false;
+            recognizer = undefined; 
+            updateButtonStates(false);
+            statusElement.textContent = 'Status: Gravação parada.';
+            console.log('stopRecording finalizada.');
+        }
+
+        // --- Evento para garantir que a gravação pare ao fechar a página. ---
+        window.addEventListener('beforeunload', () => {
+            console.log('Evento beforeunload - tentando parar gravação se ativa.');
+            if (isRecognizing) {
+                stopRecording();
+            }
+        });
+
+        console.log("Script de reconhecimento de fala carregado e pronto.");
+        statusElement.textContent = "Status: Página carregada. Clique em 'Iniciar Gravação'.";
+    </script>
+</body>
+</html>
